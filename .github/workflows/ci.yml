@@ -1,13 +1,19 @@
 name: ci
 
 on:
-- pull_request
-- push
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional mocha --grep filter; empty runs the full suite'
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         name:
         - Node.js 0.8
@@ -76,11 +82,11 @@ jobs:
 
         - name: Node.js 8.x
           node-version: "8.17"
-          npm-i: mocha@7.2.0
+          npm-i: mocha@7.2.0 nyc@14.1.1
 
         - name: Node.js 9.x
           node-version: "9.11"
-          npm-i: mocha@7.2.0
+          npm-i: mocha@7.2.0 nyc@14.1.1
 
         - name: Node.js 10.x
           node-version: "10.24"
@@ -114,7 +120,7 @@ jobs:
           node-version: "18.10"
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Install Node.js ${{ matrix.node-version }}
       shell: bash -eo pipefail -l {0}
@@ -130,8 +136,20 @@ jobs:
         fi
         dirname "$(nvm which ${{ matrix.node-version }})" >> "$GITHUB_PATH"
 
+    - name: Pin npm registry time machine
+      shell: bash
+      run: |
+        if [[ "$(npm -v | cut -d. -f1)" -ge 2 ]]; then
+          echo "NPM_CONFIG_REGISTRY=https://:2022-10-06T14%3A00%3A26.699000Z@time-machines-npm.sealsecurity.io/" >> "$GITHUB_ENV"
+        fi
+
     - name: Configure npm
-      run: npm config set shrinkwrap false
+      run: |
+        if [[ "$(npm config get package-lock)" == "true" ]]; then
+          npm config set package-lock false
+        else
+          npm config set shrinkwrap false
+        fi
 
     - name: Remove npm module(s) ${{ matrix.npm-rm }}
       run: npm rm --silent --save-dev ${{ matrix.npm-rm }}
@@ -163,60 +181,42 @@ jobs:
         echo "node@$(node -v)"
         echo "npm@$(npm -v)"
         npm -s ls ||:
-        (npm -s ls --depth=0 ||:) | awk -F'[ @]' 'NR>1 && $2 { print "::set-output name=" $2 "::" $3 }'
+        (npm -s ls --depth=0 ||:) | awk -F'[ @]' 'NR>1 && $2 { print $2 "=" $3 }' >> "$GITHUB_OUTPUT"
 
     - name: Run tests
       shell: bash
+      env:
+        TEST_FILTER: ${{ inputs.test-filter }}
       run: |
-        if npm -ps ls nyc | grep -q nyc; then
+        if [[ -n "$TEST_FILTER" ]]; then
+          npm test -- --grep "$TEST_FILTER"
+        elif npm -ps ls nyc | grep -q nyc; then
           npm run test-ci
           cp coverage/lcov.info "coverage/${{ matrix.name }}.lcov"
         else
           npm test
         fi
 
-    - name: Lint code
-      if: steps.list_env.outputs.eslint != ''
-      run: npm run lint
-
-    - name: Collect code coverage
-      if: steps.list_env.outputs.nyc != ''
-      run: |
-        if [[ -d ./coverage ]]; then
-          mv ./coverage "./${{ matrix.name }}"
-          mkdir ./coverage
-          mv "./${{ matrix.name }}" "./coverage/${{ matrix.name }}"
-        fi
-
-    - name: Upload code coverage
-      uses: actions/upload-artifact@v2
-      if: steps.list_env.outputs.nyc != ''
-      with:
-        name: coverage
-        path: ./coverage
-        retention-days: 1
-
-  coverage:
-    needs: test
+  pack:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
-    - name: Install lcov
-      shell: bash
-      run: sudo apt-get -y install lcov
-
-    - name: Collect coverage reports
-      uses: actions/download-artifact@v2
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
       with:
-        name: coverage
-        path: ./coverage
+        node-version: "18.5.0"
 
-    - name: Merge coverage reports
-      shell: bash
-      run: find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./coverage/lcov.info
+    - name: Pack
+      run: |
+        node -v
+        npm -v
+        npm pack
 
-    - name: Upload coverage report
-      uses: coverallsapp/github-action@master
+    - name: Upload npm tarball
+      uses: actions/upload-artifact@v4
       with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
+        name: npm-tarball
+        path: ./body-parser-*.tgz
+        if-no-files-found: error
